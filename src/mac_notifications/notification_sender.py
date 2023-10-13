@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import objc
 from multiprocessing import SimpleQueue
 from typing import Any
 
@@ -11,13 +12,16 @@ from PyObjCTools import AppHelper
 from mac_notifications.notification_config import JSONNotificationConfig
 
 logger = logging.getLogger()
+logging.basicConfig(level = logging.DEBUG)
 
 """
 This module is responsible for creating the notifications in the C-layer and listening/reporting about user activity.
 """
+class NativeNotification(object):
+    def cancel(self) -> None:
+        pass
 
-
-def create_notification(config: JSONNotificationConfig, queue_to_submit_events_to: SimpleQueue | None) -> Any:
+def send_notification(config: JSONNotificationConfig) -> NativeNotification:
     """
     Create a notification and possibly listed & report about notification activity.
     :param config: The configuration of the notification to send.
@@ -26,50 +30,54 @@ def create_notification(config: JSONNotificationConfig, queue_to_submit_events_t
     create the notification.
     """
 
-    class MacOSNotification(NSObject):
-        def send(self):
-            """Sending of the notification"""
-            notification = NSUserNotification.alloc().init()
-            notification.setIdentifier_(config.uid)
-            if config is not None:
-                notification.setTitle_(config.title)
-            if config.subtitle is not None:
-                notification.setSubtitle_(config.subtitle)
-            if config.text is not None:
-                notification.setInformativeText_(config.text)
-            if config.icon is not None:
-                url = NSURL.alloc().initWithString_(f"file://{config.icon}")
-                image = NSImage.alloc().initWithContentsOfURL_(url)
-                notification.setContentImage_(image)
+    notification = NSUserNotification.alloc().init()
+    notification.setIdentifier_(config.uid)
+    if config is not None:
+        notification.setTitle_(config.title)
+    if config.subtitle is not None:
+        notification.setSubtitle_(config.subtitle)
+    if config.text is not None:
+        notification.setInformativeText_(config.text)
+    if config.icon is not None:
+        url = NSURL.alloc().initWithString_(f"file://{config.icon}")
+        image = NSImage.alloc().initWithContentsOfURL_(url)
+        notification.setContentImage_(image)
 
-            # Notification buttons (main action button and other button)
-            if config.action_button_str:
-                notification.setActionButtonTitle_(config.action_button_str)
-                notification.setHasActionButton_(True)
+    # Notification buttons (main action button and other button)
+    if config.action_button_str:
+        notification.setActionButtonTitle_(config.action_button_str)
+        notification.setHasActionButton_(True)
 
-            if config.snooze_button_str:
-                notification.setOtherButtonTitle_(config.snooze_button_str)
+    if config.snooze_button_str:
+        notification.setOtherButtonTitle_(config.snooze_button_str)
 
-            if config.reply_callback_present:
-                notification.setHasReplyButton_(True)
-                if config.reply_button_str:
-                    notification.setResponsePlaceholder_(config.reply_button_str)
+    if config.reply_callback_present:
+        notification.setHasReplyButton_(True)
+        if config.reply_button_str:
+            notification.setResponsePlaceholder_(config.reply_button_str)
 
+    # Setting delivery date as current date + delay (in seconds)
+    notification.setDeliveryDate_(
+        NSDate.dateWithTimeInterval_sinceDate_(config.delay_in_seconds, NSDate.date())
+    )
+
+    # Schedule the notification send
+    NSUserNotificationCenter.defaultUserNotificationCenter().scheduleNotification_(notification)
+
+    class Wrapper(NativeNotification):
+        def cancel(self):
+            return NSUserNotificationCenter.defaultUserNotificationCenter().removeDeliveredNotification_(notification)
+
+    # return notification
+    return Wrapper()
+
+
+def wait_activations(handle_activations):
+    class NSUserNotificationCenterDelegate(NSObject):
+        def init(self):
+            self = objc.super(NSUserNotificationCenterDelegate, self).init()
             NSUserNotificationCenter.defaultUserNotificationCenter().setDelegate_(self)
-
-            # Setting delivery date as current date + delay (in seconds)
-            notification.setDeliveryDate_(
-                NSDate.dateWithTimeInterval_sinceDate_(config.delay_in_seconds, NSDate.date())
-            )
-
-            # Schedule the notification send
-            NSUserNotificationCenter.defaultUserNotificationCenter().scheduleNotification_(notification)
-
-            # Wait for the notification CallBack to happen.
-            if queue_to_submit_events_to:
-                logger.debug("Started listening for user interactions with notifications.")
-                AppHelper.runConsoleEventLoop()
-
+            return self
         def userNotificationCenter_didDeliverNotification_(
             self, center: "_NSConcreteUserNotificationCenter", notif: "_NSConcreteUserNotification"  # type: ignore  # noqa
         ) -> None:
@@ -86,24 +94,21 @@ def create_notification(config: JSONNotificationConfig, queue_to_submit_events_t
             response = notif.response()
             activation_type = notif.activationType()
 
-            if queue_to_submit_events_to is None:
-                raise ValueError("Queue should not be None here.")
-            else:
-                queue: SimpleQueue = queue_to_submit_events_to
-
             logger.debug(f"User interacted with {identifier} with activationType {activation_type}.")
             if activation_type == 1:
                 # user clicked on the notification (not on a button)
                 pass
 
             elif activation_type == 2:  # user clicked on the action button
-                queue.put((identifier, "action_button_clicked", ""))
+                handle_activations((identifier, "action_button_clicked", ""))
 
             elif activation_type == 3:  # User clicked on the reply button
-                queue.put((identifier, "reply_button_clicked", response.string()))
+                handle_activations((identifier, "reply_button_clicked", response.string()))
 
-    # create the new notification
-    new_notif = MacOSNotification.alloc().init()
+    do_not_garbage_collect_me = NSUserNotificationCenterDelegate.alloc().init()
 
-    # return notification
-    return new_notif
+    # Wait for the notification CallBack to happen.
+    logger.debug("Started listening for user interactions with notifications.")
+    AppHelper.runConsoleEventLoop()
+    logger.debug("Stopped listening for user interactions")
+

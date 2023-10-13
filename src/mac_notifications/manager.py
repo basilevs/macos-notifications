@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import atexit
 import logging
+from multiprocessing.connection import Connection
 import signal
 import sys
 import time
-from multiprocessing import SimpleQueue
+from multiprocessing import Pipe, SimpleQueue
 from threading import Event, Thread
 from typing import Dict, List
 
@@ -38,7 +39,6 @@ class NotificationManager(metaclass=Singleton):
     """
 
     def __init__(self):
-        self._callback_queue: SimpleQueue = SimpleQueue()
         self._callback_executor_event: Event = Event()
         self._callback_executor_thread: CallbackExecutorThread | None = None
         self._callback_listener_process: NotificationProcess | None = None
@@ -46,13 +46,15 @@ class NotificationManager(metaclass=Singleton):
         atexit.register(self.cleanup)
         # Specify that when we get a keyboard interrupt, this function should handle it
         signal.signal(signal.SIGINT, handler=self.catch_keyboard_interrupt)
+        self.parent_pipe_end: Connection = None
+        self.child_pipe_end: Connection = None
 
     def create_callback_executor_thread(self) -> None:
         """Creates the callback executor thread and sets the _callback_executor_event."""
         if not (self._callback_executor_thread and self._callback_executor_thread.is_alive()):
             self._callback_executor_thread = CallbackExecutorThread(
                 keep_running=self._callback_executor_event,
-                callback_queue=self._callback_queue,
+                callback_queue=self.parent_pipe_end,
             )
             self._callback_executor_event.set()
             self._callback_executor_thread.start()
@@ -63,20 +65,17 @@ class NotificationManager(metaclass=Singleton):
         :param notification_config: The configuration for the notification.
         """
         json_config = notification_config.to_json_notification()
-        if not notification_config.contains_callback or self._callback_listener_process is not None:
-            # We can send it directly and kill the process after as we don't need to listen for callbacks.
-            new_process = NotificationProcess(json_config, None)
-            new_process.start()
-            new_process.join(timeout=5)
-        else:
+        if not self._callback_listener_process:
             # We need to also start a listener, so we send the json through a separate process.
-            self._callback_listener_process = NotificationProcess(json_config, self._callback_queue)
+            
+            self.parent_pipe_end, self.child_pipe_end = Pipe()
+            self._callback_listener_process = NotificationProcess(self.child_pipe_end)
             self._callback_listener_process.start()
             self.create_callback_executor_thread()
+        self.parent_pipe_end.send(json_config)
 
-        if notification_config.contains_callback:
-            _FIFO_LIST.append(notification_config.uid)
-            _NOTIFICATION_MAP[notification_config.uid] = notification_config
+        _FIFO_LIST.append(notification_config.uid)
+        _NOTIFICATION_MAP[notification_config.uid] = notification_config
         self.clear_old_notifications()
 
     @staticmethod
@@ -117,10 +116,10 @@ class CallbackExecutorThread(Thread):
     Background threat that checks each 0.1 second whether there are any callbacks that it should execute.
     """
 
-    def __init__(self, keep_running: Event, callback_queue: SimpleQueue):
+    def __init__(self, keep_running: Event, callback_queue: Connection):
         super().__init__()
         self.event_indicating_to_continue = keep_running
-        self.callback_queue = callback_queue
+        self.callback_queue: Connection = callback_queue
 
     def run(self) -> None:
         while self.event_indicating_to_continue.is_set():
@@ -133,8 +132,13 @@ class CallbackExecutorThread(Thread):
         added to the `callback_queue`. This background Threat is then responsible for listening in on the callback_queue
         and when there is a callback it should execute, it executes it.
         """
-        while not self.callback_queue.empty():
-            msg = self.callback_queue.get()
+        while True:
+            try :
+                if not self.callback_queue.poll(1):
+                    break
+                msg = self.callback_queue.recv()
+            except EOFError:
+                break
             notification_uid, event_id, reply_text = msg
             if notification_uid not in _NOTIFICATION_MAP:
                 logger.debug(f"Received a notification interaction for {notification_uid} which we don't know.")

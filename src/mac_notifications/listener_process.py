@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from multiprocessing import Process, SimpleQueue
+from multiprocessing.connection import Connection
+from threading import Thread
 
 from mac_notifications import notification_sender
 from mac_notifications.notification_config import JSONNotificationConfig
@@ -19,11 +21,23 @@ class NotificationProcess(Process):
     without completely halting/freezing our main process, we need to open it in a background process.
     """
 
-    def __init__(self, notification_config: JSONNotificationConfig, queue: SimpleQueue | None):
-        super().__init__()
-        self.notification_config = notification_config
-        self.queue = queue
+    def __init__(self, connection: Connection):
+        super().__init__(daemon=True)
+        self.connection = connection
+
+
+    def poll(self):
+        try:
+            while True:
+                notification_config: JSONNotificationConfig = self.connection.recv()
+                notification_sender.send_notification(notification_config)
+        except EOFError:
+            pass
+
+    def handle_activation(self, activation):
+        self.connection.send(activation)
 
     def run(self) -> None:
-        notification_sender.create_notification(self.notification_config, self.queue).send()
-        # on if any of the callbacks are provided, start the event loop (this will keep the program from stopping)
+        poll_thread = Thread(None, self.poll, daemon=True)
+        poll_thread.start()
+        notification_sender.wait_activations(self.handle_activation)
