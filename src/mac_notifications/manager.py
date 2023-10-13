@@ -121,10 +121,6 @@ class CallbackExecutorThread(Thread):
         self.callback_queue: Connection = callback_queue
 
     def run(self) -> None:
-        while self.drain_queue():
-            pass
-
-    def drain_queue(self) -> None:
         """
         This drains the Callback Queue. When there is a notification for which a callback should be fired, this event is
         added to the `callback_queue`. This background Threat is then responsible for listening in on the callback_queue
@@ -133,12 +129,10 @@ class CallbackExecutorThread(Thread):
         while True:
             try :
                 if not self.callback_queue.poll(0.1):
-                    break
+                    continue
                 msg = self.callback_queue.recv()
-            except EOFError:
-                return False
-            except OSError:
-                return False
+            except OSError: # the connection is closed from Resources class
+                break
             notification_uid, event_id, reply_text = msg
             if notification_uid not in _NOTIFICATION_MAP:
                 logger.debug(f"Received a notification interaction for {notification_uid} which we don't know.")
@@ -161,7 +155,6 @@ class CallbackExecutorThread(Thread):
             else:
                 raise ValueError(f"Unknown event_id: {event_id}.")
             clear_notification_from_existence(notification_uid)
-        return True
 
 
 def clear_notification_from_existence(notification_id: str) -> None:
