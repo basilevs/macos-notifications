@@ -39,7 +39,6 @@ class NotificationManager(metaclass=Singleton):
     """
 
     def __init__(self):
-        self._callback_executor_event: Event = Event()
         self._callback_executor_thread: CallbackExecutorThread | None = None
         self._callback_listener_process: NotificationProcess | None = None
         # Specify that once we stop our application, self.cleanup should run
@@ -53,10 +52,8 @@ class NotificationManager(metaclass=Singleton):
         """Creates the callback executor thread and sets the _callback_executor_event."""
         if not (self._callback_executor_thread and self._callback_executor_thread.is_alive()):
             self._callback_executor_thread = CallbackExecutorThread(
-                keep_running=self._callback_executor_event,
                 callback_queue=self.parent_pipe_end,
             )
-            self._callback_executor_event.set()
             self._callback_executor_thread.start()
 
     def create_notification(self, notification_config: NotificationConfig) -> None:
@@ -100,13 +97,18 @@ class NotificationManager(metaclass=Singleton):
 
     def cleanup(self) -> None:
         """Stop all processes related to the Notification callback handling."""
-        if self._callback_executor_thread:
-            self._callback_executor_event.clear()
-            self._callback_executor_thread.join()
+        if self.parent_pipe_end:
+            self.parent_pipe_end.close()
+            self.parent_pipe_end = None
+        if self.child_pipe_end:
+            self.child_pipe_end.close()
+            self.child_pipe_end = None
         if self._callback_listener_process:
             self._callback_listener_process.kill()
-        self._callback_executor_thread = None
-        self._callback_listener_process = None
+            self._callback_listener_process = None
+        if self._callback_executor_thread: 
+            self._callback_executor_thread.join()
+            self._callback_executor_thread = None
         _NOTIFICATION_MAP.clear()
         _FIFO_LIST.clear()
 
@@ -116,15 +118,13 @@ class CallbackExecutorThread(Thread):
     Background threat that checks each 0.1 second whether there are any callbacks that it should execute.
     """
 
-    def __init__(self, keep_running: Event, callback_queue: Connection):
+    def __init__(self, callback_queue: Connection):
         super().__init__()
-        self.event_indicating_to_continue = keep_running
         self.callback_queue: Connection = callback_queue
 
     def run(self) -> None:
-        while self.event_indicating_to_continue.is_set():
-            self.drain_queue()
-            time.sleep(0.1)
+        while self.drain_queue():
+            pass
 
     def drain_queue(self) -> None:
         """
@@ -134,11 +134,13 @@ class CallbackExecutorThread(Thread):
         """
         while True:
             try :
-                if not self.callback_queue.poll(1):
+                if not self.callback_queue.poll(0.1):
                     break
                 msg = self.callback_queue.recv()
             except EOFError:
-                break
+                return False
+            except OSError:
+                return False
             notification_uid, event_id, reply_text = msg
             if notification_uid not in _NOTIFICATION_MAP:
                 logger.debug(f"Received a notification interaction for {notification_uid} which we don't know.")
@@ -161,6 +163,7 @@ class CallbackExecutorThread(Thread):
             else:
                 raise ValueError(f"Unknown event_id: {event_id}.")
             clear_notification_from_existence(notification_uid)
+        return True
 
 
 def clear_notification_from_existence(notification_id: str) -> None:
