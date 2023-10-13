@@ -81,3 +81,8 @@ class JSONNotificationConfig:
     @property
     def contains_callback(self) -> bool:
         return bool(self.action_callback_present or self.reply_callback_present)
+    
+@dataclass
+class JSONCancelRequest:
+    uid: str
+

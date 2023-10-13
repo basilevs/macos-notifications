@@ -11,7 +11,7 @@ from threading import Event, Thread
 from typing import Dict, List
 
 from mac_notifications.listener_process import NotificationProcess
-from mac_notifications.notification_config import NotificationConfig
+from mac_notifications.notification_config import JSONCancelRequest, NotificationConfig
 from mac_notifications.singleton import Singleton
 
 """
@@ -42,6 +42,7 @@ class Resources(object):
             )
         self._callback_executor_thread.start()
         self._callback_listener_process: NotificationProcess = NotificationProcess(self._child_pipe_end)
+        self._callback_listener_process.start()
         
     def close(self) -> None:
         """Stop all processes related to the Notification callback handling."""
@@ -50,6 +51,10 @@ class Resources(object):
         self._callback_listener_process.kill()
         self._callback_executor_thread.join()
 
+
+class Notification(object):
+    def cancel(self):
+        pass
 
 class NotificationManager(metaclass=Singleton):
     """
@@ -66,7 +71,7 @@ class NotificationManager(metaclass=Singleton):
         signal.signal(signal.SIGINT, handler=self.catch_keyboard_interrupt)
 
     def _get_resources(self) -> Resources:
-        if not self._resoruces:
+        if not self._resources:
             self._resources = Resources()
         return self._resources
 
@@ -76,11 +81,19 @@ class NotificationManager(metaclass=Singleton):
         :param notification_config: The configuration for the notification.
         """
         json_config = notification_config.to_json_notification()            
-        self.getResources().parent_pipe_end.send(json_config)
+        pipe_end:Connection = self._get_resources().parent_pipe_end
+        pipe_end.send(json_config)
 
         _FIFO_LIST.append(notification_config.uid)
         _NOTIFICATION_MAP[notification_config.uid] = notification_config
         self.clear_old_notifications()
+
+        class NotificationClosure(Notification):
+            def cancel(self):
+                if not pipe_end.closed:
+                    pipe_end.send(JSONCancelRequest(uid = notification_config.uid))
+                clear_notification_from_existence(notification_config.uid)
+        return NotificationClosure()
 
     @staticmethod
     def clear_old_notifications() -> None:

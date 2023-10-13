@@ -5,7 +5,7 @@ from multiprocessing.connection import Connection
 from threading import Thread
 
 from mac_notifications import notification_sender
-from mac_notifications.notification_config import JSONNotificationConfig
+from mac_notifications.notification_config import JSONCancelRequest, JSONNotificationConfig
 
 
 class NotificationProcess(Process):
@@ -25,12 +25,14 @@ class NotificationProcess(Process):
         super().__init__(daemon=True)
         self.connection = connection
 
-
     def poll(self):
         try:
             while True:
-                notification_config: JSONNotificationConfig = self.connection.recv()
-                notification_sender.send_notification(notification_config)
+                result =  self.connection.recv()
+                if isinstance(result, JSONNotificationConfig):
+                    notification_sender.send_notification(result)
+                if isinstance(result, JSONCancelRequest):
+                    notification_sender.cancel_notification(result.uid)
         except EOFError:
             pass
 

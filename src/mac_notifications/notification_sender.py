@@ -21,6 +21,11 @@ class NativeNotification(object):
     def cancel(self) -> None:
         pass
 
+def cancel_notification(uid:str):
+    notification = NSUserNotification.alloc().init()
+    notification.setIdentifier_(uid)
+    NSUserNotificationCenter.defaultUserNotificationCenter().removeDeliveredNotification_(notification)
+
 def send_notification(config: JSONNotificationConfig) -> NativeNotification:
     """
     Create a notification and possibly listed & report about notification activity.
@@ -63,14 +68,6 @@ def send_notification(config: JSONNotificationConfig) -> NativeNotification:
 
     # Schedule the notification send
     NSUserNotificationCenter.defaultUserNotificationCenter().scheduleNotification_(notification)
-
-    class Wrapper(NativeNotification):
-        def cancel(self):
-            return NSUserNotificationCenter.defaultUserNotificationCenter().removeDeliveredNotification_(notification)
-
-    # return notification
-    return Wrapper()
-
 
 def wait_activations(handle_activations):
     class NSUserNotificationCenterDelegate(NSObject):
