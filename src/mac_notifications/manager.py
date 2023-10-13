@@ -31,6 +31,26 @@ _NOTIFICATION_MAP: Dict[str, NotificationConfig] = {}
 logger = logging.getLogger()
 
 
+class Resources(object):
+    """ Handles all system resource that should freed up when framework is not used """
+    def __init__(self):
+        self.parent_pipe_end: Connection = None
+        self._child_pipe_end: Connection = None
+        self.parent_pipe_end, self._child_pipe_end = Pipe()
+        self._callback_executor_thread: CallbackExecutorThread = CallbackExecutorThread(
+                callback_queue=self.parent_pipe_end,
+            )
+        self._callback_executor_thread.start()
+        self._callback_listener_process: NotificationProcess = NotificationProcess(self._child_pipe_end)
+        
+    def close(self) -> None:
+        """Stop all processes related to the Notification callback handling."""
+        self.parent_pipe_end.close()
+        self._child_pipe_end.close()
+        self._callback_listener_process.kill()
+        self._callback_executor_thread.join()
+
+
 class NotificationManager(metaclass=Singleton):
     """
     The NotificationManager is responsible for managing the notifications. This includes the following:
@@ -39,37 +59,24 @@ class NotificationManager(metaclass=Singleton):
     """
 
     def __init__(self):
-        self._callback_executor_thread: CallbackExecutorThread | None = None
-        self._callback_listener_process: NotificationProcess | None = None
+        self._resources: Resources = None
         # Specify that once we stop our application, self.cleanup should run
         atexit.register(self.cleanup)
         # Specify that when we get a keyboard interrupt, this function should handle it
         signal.signal(signal.SIGINT, handler=self.catch_keyboard_interrupt)
-        self.parent_pipe_end: Connection = None
-        self.child_pipe_end: Connection = None
 
-    def create_callback_executor_thread(self) -> None:
-        """Creates the callback executor thread and sets the _callback_executor_event."""
-        if not (self._callback_executor_thread and self._callback_executor_thread.is_alive()):
-            self._callback_executor_thread = CallbackExecutorThread(
-                callback_queue=self.parent_pipe_end,
-            )
-            self._callback_executor_thread.start()
+    def _get_resources(self) -> Resources:
+        if not self._resoruces:
+            self._resources = Resources()
+        return self._resources
 
     def create_notification(self, notification_config: NotificationConfig) -> None:
         """
         Create a notification and the corresponding processes if required for a notification with callbacks.
         :param notification_config: The configuration for the notification.
         """
-        json_config = notification_config.to_json_notification()
-        if not self._callback_listener_process:
-            # We need to also start a listener, so we send the json through a separate process.
-            
-            self.parent_pipe_end, self.child_pipe_end = Pipe()
-            self._callback_listener_process = NotificationProcess(self.child_pipe_end)
-            self._callback_listener_process.start()
-            self.create_callback_executor_thread()
-        self.parent_pipe_end.send(json_config)
+        json_config = notification_config.to_json_notification()            
+        self.getResources().parent_pipe_end.send(json_config)
 
         _FIFO_LIST.append(notification_config.uid)
         _NOTIFICATION_MAP[notification_config.uid] = notification_config
@@ -97,18 +104,9 @@ class NotificationManager(metaclass=Singleton):
 
     def cleanup(self) -> None:
         """Stop all processes related to the Notification callback handling."""
-        if self.parent_pipe_end:
-            self.parent_pipe_end.close()
-            self.parent_pipe_end = None
-        if self.child_pipe_end:
-            self.child_pipe_end.close()
-            self.child_pipe_end = None
-        if self._callback_listener_process:
-            self._callback_listener_process.kill()
-            self._callback_listener_process = None
-        if self._callback_executor_thread: 
-            self._callback_executor_thread.join()
-            self._callback_executor_thread = None
+        if self._resources:
+            self._resources.close()
+            self._resources = None
         _NOTIFICATION_MAP.clear()
         _FIFO_LIST.clear()
 
